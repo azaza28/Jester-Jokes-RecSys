@@ -4,18 +4,11 @@ import torch.nn as nn
 import torch.optim as optim
 import polars as pl
 import os
+import json
 
 
 class GRU4Rec(nn.Module):
     def __init__(self, num_items, embedding_dim, hidden_dim):
-        """
-        📘 GRU-based session-based recommendation model.
-
-        Args:
-            num_items (int): Number of unique items in the dataset.
-            embedding_dim (int): Dimension of the embeddings.
-            hidden_dim (int): Dimension of the GRU hidden state.
-        """
         super(GRU4Rec, self).__init__()
         self.embedding = nn.Embedding(num_items, embedding_dim)
         self.gru = nn.GRU(embedding_dim, hidden_dim, batch_first=True)
@@ -30,69 +23,51 @@ class GRU4Rec(nn.Module):
 
 class SessionBasedModel:
     def __init__(self):
-        """
-        📘 Session-based recommendation model (GRU + Co-occurrence)
-        """
         self.model = None
-        self.co_occurrence_matrix = None
+        self.joke_index_map = None
+        self.index_to_joke_id = None
+        self.user_sessions = None
 
     def train(self, train_df, embedding_dim=64, hidden_dim=128, epochs=5, lr=0.001):
-        """
-        🚀 Train the GRU4Rec model using session-based training.
-
-        Args:
-            train_df (pl.DataFrame): DataFrame with columns ['userId', 'jokeId'].
-            embedding_dim (int): Dimension of the embeddings.
-            hidden_dim (int): Dimension of the GRU hidden state.
-            epochs (int): Number of training epochs.
-            lr (float): Learning rate.
-        """
         print("\n🔹 Extracting user sessions for GRU training...")
 
-        # 🔥 Extract user sessions
-        sessions = self.extract_sessions(train_df)
-        num_items = train_df["jokeId"].max() + 1  # Number of unique items
+        train_df = train_df.with_columns([
+            pl.col("jokeId").cast(pl.Utf8).cast(pl.Categorical).alias("joke_idx")
+        ])
+        train_df = train_df.with_columns(pl.col("joke_idx").to_physical().alias("joke_idx_int"))
 
-        print(f"📦 Extracted {len(sessions)} sessions for training.")
+        joke_id_to_index = train_df['jokeId'].to_list()
+        joke_index_to_id = train_df['joke_idx_int'].to_list()
+        self.joke_index_map = dict(zip(joke_id_to_index, joke_index_to_id))
+        self.index_to_joke_id = {v: k for k, v in self.joke_index_map.items()}
 
-        # 🚀 Train GRU4Rec
-        print(f"🚀 Training GRU4Rec with {num_items} items...")
-        self.train_gru_model(sessions, num_items, embedding_dim, hidden_dim, epochs, lr)
+        self.user_sessions = self.extract_sessions(train_df)
+        num_items = len(self.joke_index_map)
 
-    def extract_sessions(self, train_df):
-        """
-        📦 Extract user sessions from the train DataFrame.
+        print(f"🚀 Training GRU4Rec with {num_items} items (total unique jokes) ...")
+        self.train_gru_model(self.user_sessions, num_items, embedding_dim, hidden_dim, epochs, lr)
 
-        Args:
-            train_df (pl.DataFrame): The training DataFrame with columns ['userId', 'jokeId'].
+    def extract_sessions(self, train_df, session_length=5):
+        print("🔹 Extracting logical sessions from training data...")
 
-        Returns:
-            list: List of sessions, where each session is a list of joke IDs interacted by the user.
-        """
-        print("🔹 Extracting sessions from training data...")
         sessions = (
             train_df
-            .sort(["userId", "jokeId"])  # Sort by userId and jokeId (or use timestamp if you have it)
+            .sort(["userId", "joke_idx_int"])
             .groupby("userId")
-            .agg(pl.col("jokeId").alias("session"))
+            .agg(pl.col("joke_idx_int").alias("session"))
         )
 
-        session_list = sessions["session"].to_list()
-        print(f"✅ Extracted {len(session_list)} sessions from training data.")
-        return session_list
+        session_dict = {}
+        for user_id, joke_indices in zip(sessions['userId'], sessions['session']):
+            if len(joke_indices) > session_length:
+                session_dict[user_id] = [int(x) for x in joke_indices[-session_length:]]
+            else:
+                session_dict[user_id] = [int(x) for x in joke_indices]
+
+        print(f"✅ Extracted {len(session_dict)} sessions from training data.")
+        return session_dict
 
     def train_gru_model(self, sessions, num_items, embedding_dim, hidden_dim, epochs, lr):
-        """
-        🚀 Train the GRU4Rec model.
-
-        Args:
-            sessions (list): List of user sessions.
-            num_items (int): Number of unique items.
-            embedding_dim (int): Dimension of the embeddings.
-            hidden_dim (int): Dimension of the GRU hidden state.
-            epochs (int): Number of training epochs.
-            lr (float): Learning rate.
-        """
         model = GRU4Rec(num_items, embedding_dim, hidden_dim)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         criterion = nn.CrossEntropyLoss()
@@ -100,15 +75,16 @@ class SessionBasedModel:
         model.train()
         for epoch in range(epochs):
             epoch_loss = 0
-            for session in sessions:
-                if len(session) < 2:  # 🚫 Skip short sessions
+            for user_id, session in sessions.items():
+                if len(session) < 2:
                     continue
-                session_tensor = torch.tensor(session[:-1]).unsqueeze(0)  # Shape: (1, T-1)
-                target = torch.tensor(session[1:])  # Target for the next item
+
+                session_tensor = torch.tensor([int(joke) for joke in session[:-1]], dtype=torch.long).unsqueeze(0)
+                target = torch.tensor([int(joke) for joke in session[1:]], dtype=torch.long)
 
                 optimizer.zero_grad()
-                logits = model(session_tensor)  # Predict for the entire sequence
-                loss = criterion(logits, target[-1].unsqueeze(0))  # 🎯 Only predict the last item
+                logits = model(session_tensor)
+                loss = criterion(logits, target[-1].unsqueeze(0))
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
@@ -118,60 +94,66 @@ class SessionBasedModel:
         self.model = model
         print("✅ GRU4Rec model training complete.")
 
-    def save_model(self, model_path="../models/gru4rec.pth", co_occurrence_path="../models/cooccurrence_matrix.npy"):
-        """
-        💾 Save the GRU model and co-occurrence matrix.
+    def save_model(self, folder_path="../models/session_based_model/"):
+        os.makedirs(folder_path, exist_ok=True)
 
-        Args:
-            model_path (str): Path to save the GRU model.
-            co_occurrence_path (str): Path to save the co-occurrence matrix.
-        """
-        if self.model is not None:
-            torch.save(self.model.state_dict(), model_path)
-            print(f"✅ GRU4Rec model saved at {model_path}")
-        else:
-            print("⚠️ No GRU model to save.")
+        torch.save(self.model.state_dict(), os.path.join(folder_path, 'session_gru.pth'))
+        with open(os.path.join(folder_path, 'joke_index_map.json'), 'w') as f:
+            json.dump(self.joke_index_map, f)
+        with open(os.path.join(folder_path, 'user_sessions.json'), 'w') as f:
+            json.dump(self.user_sessions, f)
+        metadata = {
+            "num_items": len(self.joke_index_map),
+            "embedding_dim": self.model.embedding.embedding_dim,
+            "hidden_dim": self.model.gru.hidden_size
+        }
+        with open(os.path.join(folder_path, 'metadata.json'), 'w') as f:
+            json.dump(metadata, f)
 
-        if self.co_occurrence_matrix is not None:
-            np.save(co_occurrence_path, self.co_occurrence_matrix)
-            print(f"✅ Co-occurrence matrix saved at {co_occurrence_path}")
-        else:
-            print("⚠️ No co-occurrence matrix to save.")
+    @staticmethod
+    def load_model(folder_path="../models/session_based_model/"):
+        if not os.path.exists(folder_path):
+            raise FileNotFoundError(f"❌ Folder not found: {folder_path}")
 
-    def load_model(self, model_path="../models/gru4rec.pth", num_items=None, embedding_dim=64, hidden_dim=128):
-        """
-        📦 Load the GRU4Rec model.
+        with open(os.path.join(folder_path, 'metadata.json'), 'r') as f:
+            metadata = json.load(f)
 
-        Args:
-            model_path (str): Path to the GRU model file.
-            num_items (int): Number of unique items (needed for model architecture).
-            embedding_dim (int): Dimension of the embeddings.
-            hidden_dim (int): Dimension of the GRU hidden state.
-        """
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"❌ Model file not found at {model_path}")
+        instance = SessionBasedModel()
+        num_items = metadata['num_items']
+        embedding_dim = metadata['embedding_dim']
+        hidden_dim = metadata['hidden_dim']
 
-        self.model = GRU4Rec(num_items, embedding_dim, hidden_dim)
-        self.model.load_state_dict(torch.load(model_path))
-        self.model.eval()
-        print(f"✅ GRU4Rec model loaded successfully from {model_path}")
+        instance.model = GRU4Rec(num_items, embedding_dim, hidden_dim)
+        instance.model.load_state_dict(torch.load(os.path.join(folder_path, 'session_gru.pth')))
+        instance.model.eval()
 
-    def predict_next_item(self, session):
-        """
-        🔮 Predict the next item for a given session.
+        with open(os.path.join(folder_path, 'joke_index_map.json'), 'r') as f:
+            instance.joke_index_map = json.load(f)
+        with open(os.path.join(folder_path, 'user_sessions.json'), 'r') as f:
+            instance.user_sessions = json.load(f)
 
-        Args:
-            session (list): List of joke IDs representing the user's session.
+        instance.index_to_joke_id = {v: k for k, v in instance.joke_index_map.items()}
+        print(f"✅ Model loaded with {num_items} items, embedding_dim={embedding_dim}, hidden_dim={hidden_dim}")
+        return instance
 
-        Returns:
-            int: Predicted next joke ID.
-        """
-        if self.model is None:
-            raise ValueError("❌ Model is not loaded. Call load_model() first.")
+    def recommend(self, user_id, train_df=None, top_n=10):
+        if self.user_sessions is None or user_id not in self.user_sessions:
+            if train_df is not None:
+                user_session = train_df.filter(pl.col('userId') == user_id)['jokeId'].to_list()[-5:]
+                if user_session:
+                    joke_indices = [self.joke_index_map.get(str(joke_id)) for joke_id in user_session]
+                    self.user_sessions[user_id] = [int(x) for x in joke_indices if x is not None]
 
-        session_tensor = torch.tensor(session).unsqueeze(0)  # Shape: (1, T)
-        logits = self.model(session_tensor)
-        predicted_item = torch.argmax(logits, dim=1).item()
+        session = self.user_sessions.get(user_id, [])
+        if len(session) > 5:
+            session = session[-5:]
 
-        print(f"🔮 Predicted next item for session {session}: {predicted_item}")
-        return predicted_item
+        session_tensor = torch.tensor([int(joke) for joke in session], dtype=torch.long).unsqueeze(0)
+
+        with torch.no_grad():
+            logits = self.model(session_tensor)
+            top_indices = torch.topk(logits, top_n).indices.squeeze().tolist()
+
+        recommended_jokes = [self.index_to_joke_id[idx] for idx in top_indices if idx in self.index_to_joke_id]
+
+        return recommended_jokes

@@ -3,12 +3,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse import csr_matrix
 import polars as pl
 import pickle
+import os
 
 
 class CollaborativeMemoryModel:
     def __init__(self, method="user"):
         """
-        📘 Memory-based collaborative filtering model.
+        Memory-based collaborative filtering model.
 
         Args:
             method (str): 'user' for user-user filtering, 'item' for item-item filtering.
@@ -19,39 +20,45 @@ class CollaborativeMemoryModel:
         self.user_ids = None
         self.item_ids = None
 
-    def train(self, ratings):
+    def train(self, ratings: pl.DataFrame):
         """
-        🚀 Train the model by computing similarity matrices.
+        Train the model by computing similarity matrices.
 
         Args:
             ratings (pl.DataFrame): Polars DataFrame with columns ['userId', 'jokeId', 'rating'].
         """
-        print("🔹 Extracting user and item indices...")
+        if ratings.is_empty():
+            raise ValueError("❌ Ratings DataFrame is empty. Please provide a valid training dataset.")
 
-        # Step 1: Extract user and item IDs as lists
+        print("⚙️  Extracting user and item IDs...")
         self.user_ids = ratings.select("userId").unique().to_series().to_list()
         self.item_ids = ratings.select("jokeId").unique().to_series().to_list()
 
+        print(f"📦 Total users: {len(self.user_ids)}, Total items: {len(self.item_ids)}")
+
         # Step 2: Convert userId and jokeId to categorical indices
-        print("🔹 Converting userId and jokeId to categorical indices...")
+        print("⚙️  Converting userId and jokeId to categorical indices...")
         ratings = ratings.with_columns([
             pl.col("userId").cast(pl.Utf8).cast(pl.Categorical).alias("user_idx"),
             pl.col("jokeId").cast(pl.Utf8).cast(pl.Categorical).alias("item_idx")
         ])
 
-        # Extract the integer representations of the categorical indices
         user_index = ratings.get_column("user_idx").to_physical().to_numpy().flatten()
         item_index = ratings.get_column("item_idx").to_physical().to_numpy().flatten()
+        rating_values = ratings.get_column("rating").to_numpy().flatten()
 
-        print("🔹 Creating the sparse ratings matrix...")
+        print(f"🔢 Building sparse matrix with shape ({len(self.user_ids)}, {len(self.item_ids)})...")
 
         # Step 3: Create a sparse ratings matrix
         self.ratings_matrix = csr_matrix(
-            (
-                ratings.select("rating").to_numpy().flatten(),
-                (user_index, item_index)
-            )
+            (rating_values, (user_index, item_index)),
+            shape=(len(self.user_ids), len(self.item_ids))
         )
+
+        if self.ratings_matrix.nnz == 0:
+            raise ValueError("❌ The ratings matrix is empty. Please check if the input data is correct.")
+
+        print(f"✅ Ratings matrix created with {self.ratings_matrix.nnz} non-zero entries.")
 
         # Step 4: Calculate the similarity matrix (user-user or item-item)
         if self.method == "user":
@@ -76,67 +83,43 @@ class CollaborativeMemoryModel:
         Returns:
             list: Recommended joke IDs.
         """
-        if self.similarity_matrix is None:
-            raise ValueError("The model is not trained yet. Please call train() first.")
-
-        if user_id not in self.user_ids:
-            raise ValueError(f"User ID {user_id} not found in the user index.")
-
-        # Step 1: Find the index for the given user_id
-        user_idx = self.user_ids.index(user_id)
-        user_similarity_vector = self.similarity_matrix[user_idx].reshape(1, -1)  # Ensure it is 2D
-
         if self.ratings_matrix is None:
-            raise ValueError("Ratings matrix is not set. Please ensure the model is trained properly.")
+            raise ValueError("❌ Ratings matrix is not set. Please ensure the model is trained properly.")
+        if user_id not in self.user_ids:
+            raise ValueError(f"❌ User ID {user_id} not found in the user index.")
 
-        if self.ratings_matrix.ndim != 2:
-            raise ValueError(f"Expected self.ratings_matrix to be 2D, but got shape {self.ratings_matrix.shape}")
-
-        if user_similarity_vector.ndim != 2:
-            raise ValueError(f"Expected user similarity vector to be 2D, but got shape {user_similarity_vector.shape}")
-
-        print(f"User idx: {user_idx}, User similarity vector shape: {user_similarity_vector.shape}")
-        print(f"Ratings matrix shape: {self.ratings_matrix.shape}")
-
-        # Step 2: Calculate scores using the similarity matrix and ratings matrix
-        scores = user_similarity_vector @ self.ratings_matrix
-
-        # Step 3: Get the top-N joke indices
-        recommended_indices = np.argsort(scores.flatten())[::-1][:top_n]
-
-        # Step 4: Convert the indices to joke IDs
+        user_idx = self.user_ids.index(user_id)
+        scores = self.similarity_matrix[user_idx] @ self.ratings_matrix
+        recommended_indices = np.argsort(scores)[::-1][:top_n]
         recommended_joke_ids = [self.item_ids[i] for i in recommended_indices]
-
         return recommended_joke_ids
 
     def save_model(self, filepath: str):
         """
-        💾 Save the model to a file using pickle.
+        Save the entire model to a pickle file.
 
         Args:
-            filepath (str): The path to save the model.
+            filepath (str): Path where to save the model file.
         """
-        print(f"💾 Saving CollaborativeMemoryModel to {filepath}...")
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        print(f"💾 Saving entire CollaborativeMemoryModel to {filepath}...")
         with open(filepath, "wb") as f:
-            pickle.dump({
-                'similarity_matrix': self.similarity_matrix,
-                'user_ids': self.user_ids,
-                'item_ids': self.item_ids
-            }, f)
+            pickle.dump(self, f)
         print(f"✅ Collaborative Memory-Based model saved successfully at {filepath}")
 
-    def load_model(self, filepath: str):
+    @staticmethod
+    def load_model(filepath: str):
         """
-        📦 Load the model from a pickle file.
+        Load the model from a pickle file.
 
         Args:
-            filepath (str): The path to the saved model file.
-        """
-        print(f"📦 Loading CollaborativeMemoryModel from {filepath}...")
-        with open(filepath, "rb") as f:
-            model_data = pickle.load(f)
+            filepath (str): Path to the saved model file.
 
-        self.similarity_matrix = model_data['similarity_matrix']
-        self.user_ids = model_data['user_ids']
-        self.item_ids = model_data['item_ids']
+        Returns:
+            CollaborativeMemoryModel: Loaded model instance.
+        """
+        print(f"📦 Loading entire CollaborativeMemoryModel from {filepath}...")
+        with open(filepath, "rb") as f:
+            model = pickle.load(f)
         print(f"✅ Collaborative Memory-Based model loaded successfully from {filepath}")
+        return model

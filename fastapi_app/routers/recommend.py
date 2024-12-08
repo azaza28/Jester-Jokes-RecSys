@@ -47,24 +47,35 @@ except Exception as e:
     print(f"❌ Failed to initialize models. Error: {str(e)}")
 
 
-
 @router.get("/recommend/{user_id}")
 def get_recommendations(user_id: int, joke_id: int = None):
     """Endpoint to get recommendations for a specific user."""
-    group = "A"  # Assume a simple group assignment for now
+    # 🔥 Assign user to a group based on the hash of the user_id modulo 5
+    group_id = user_id % 5
+    group_map = {
+        0: 'A',
+        1: 'B',
+        2: 'C',
+        3: 'D',
+        4: 'E'
+    }
+    group = group_map[group_id]
 
-    if group == 'A':
-        recommendations = baseline_model.predict()
-    elif group == 'B':
-        recommendations = content_based_model.recommend(joke_id)
-    elif group == 'C':
-        recommendations = collaborative_memory_model.recommend(user_id)
-    elif group == 'D':
-        recommendations = collaborative_model_based.recommend(user_id)
-    elif group == 'E':
-        recommendations = session_based_model.recommend_from_session(user_id)
-    else:
-        raise HTTPException(status_code=500, detail="Invalid group assignment.")
+    try:
+        if group == 'A':
+            recommendations = baseline_model.recommend(user_id)
+        elif group == 'B':
+            recommendations = content_based_model.recommend(user_id)
+        elif group == 'C':
+            recommendations = collaborative_memory_model.recommend(user_id)
+        elif group == 'D':
+            recommendations = collaborative_model_based.recommend(user_id)
+        elif group == 'E':
+            recommendations = session_based_model.recommend(user_id)
+        else:
+            raise HTTPException(status_code=500, detail="Invalid group assignment.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating recommendations: {str(e)}")
 
     return {"user_id": user_id, "group": group, "recommendations": recommendations}
 

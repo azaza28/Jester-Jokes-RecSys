@@ -1,7 +1,10 @@
+import polars as pl
 import numpy as np
 import os
 import json
+import pickle  # For saving the whole object
 from sklearn.metrics.pairwise import cosine_similarity
+from models.baseline_model import BaselineModel  # Import the BaselineModel
 
 
 class ContentBasedModel:
@@ -16,6 +19,7 @@ class ContentBasedModel:
         self.embeddings = None  # Embeddings for all jokes
         self.similarity_matrix = None  # Cosine similarity matrix for all jokes
         self.joke_ids = None  # List of joke IDs corresponding to the embeddings
+        self.baseline_model = None  # Placeholder for the baseline model (loaded dynamically)
 
     def train(self, embeddings, joke_ids):
         """
@@ -35,12 +39,14 @@ class ContentBasedModel:
         self.similarity_matrix = cosine_similarity(self.embeddings)
         print(f"✅ Cosine similarity matrix shape: {self.similarity_matrix.shape}")
 
-    def recommend(self, joke_id, top_n=10):
+    def recommend(self, user_id, train_df=None, top_n=10):
         """
-        Recommends similar jokes to the given joke ID.
+        🔮 Recommends similar jokes for the given user ID.
+        If the user has no prior interactions, fallback to Baseline recommendations.
 
         Args:
-            joke_id (int): ID of the joke to recommend similar jokes for.
+            user_id (int): User ID for which the recommendation is being made.
+            train_df (pl.DataFrame, optional): The train set containing 'userId' and 'jokeId'. Used to find user's prior interactions.
             top_n (int): Number of similar jokes to return.
 
         Returns:
@@ -49,74 +55,77 @@ class ContentBasedModel:
         if self.similarity_matrix is None or self.joke_ids is None:
             raise ValueError("❌ Model has not been trained. Please train the model first.")
 
-        # 🔥 Check if the joke ID exists in the list of joke IDs
-        if joke_id not in self.joke_ids:
-            print(f"❌ Joke ID {joke_id} not found in the dataset.")
+        if train_df is not None:
+            # Get the user's past joke interactions from the test DataFrame
+            user_interacted_jokes = train_df.filter(pl.col("userId") == user_id)["jokeId"].to_list()
+        else:
+            user_interacted_jokes = []
 
-            # Fallback to recommend a random joke
-            random_recommendation = np.random.choice(self.joke_ids, size=top_n, replace=False).tolist()
-            print(f"🎉 Fallback Recommendation: {random_recommendation}")
-            return random_recommendation
+        if not user_interacted_jokes:
+            print(f"⚠️ No prior interactions found for User ID {user_id}. Falling back to Baseline recommendations.")
 
-    def recommend(self, joke_id, top_n=10):
-        """
-        Recommends similar jokes to the given joke ID.
+            # Load the Baseline model if it is not loaded
+            if self.baseline_model is None:
+                try:
+                    print(f"📦 Loading Baseline Model from ../models/baseline_model/...")
+                    self.baseline_model = BaselineModel.load_model("../models/baseline_model/")
+                except Exception as e:
+                    print(f"❌ Failed to load Baseline Model: {e}")
+                    print(f"🎉 Fallback to random joke recommendations instead.")
+                    fallback_recommendations = np.random.choice(self.joke_ids, top_n, replace=False).tolist()
+                    return fallback_recommendations
 
-        Args:
-            joke_id (int): ID of the joke to recommend similar jokes for.
-            top_n (int): Number of similar jokes to return.
+            # Recommend using the Baseline model
+            print(f"🌟 Using Baseline Model to recommend for User ID {user_id}...")
+            recommended_jokes = self.baseline_model.recommend(top_n=top_n)
+            print(f"🎉 Baseline Recommendations for User ID {user_id}: {recommended_jokes}")
+            return recommended_jokes
 
-        Returns:
-            list: Top-N recommended joke IDs (or an empty list if something goes wrong).
-        """
-        if self.similarity_matrix is None or self.joke_ids is None:
-            print("❌ Model has not been trained. Please train the model first.")
-            random_recommendation = np.random.choice(self.joke_ids, size=top_n, replace=False).tolist()
-            print(f"🎉 Fallback Recommendation: {random_recommendation}")
-            return random_recommendation
+        # Use one of the user's interacted jokes as the "anchor" for recommendations
+        random_joke_id = np.random.choice(user_interacted_jokes)
 
-        if joke_id not in self.joke_ids:
-            print(f"❌ Joke ID {joke_id} not found in the dataset.")
-            random_recommendation = np.random.choice(self.joke_ids, size=top_n, replace=False).tolist()
-            print(f"🎉 Fallback Recommendation: {random_recommendation}")
-            return random_recommendation
+        # If the selected joke is not part of the current joke pool, fallback to Baseline
+        if random_joke_id not in self.joke_ids:
+            print(
+                f"⚠️ Joke ID {random_joke_id} is not in the model. Falling back to Baseline recommendations for User ID {user_id}.")
+            return self.baseline_model.recommend(top_n=top_n)
 
-        idx = self.joke_ids.index(joke_id)
+        # Generate recommendations using the content-based method
+        idx = self.joke_ids.index(random_joke_id)
         similarity_scores = self.similarity_matrix[idx]
         top_indices = np.argsort(similarity_scores)[::-1][1:top_n + 1]
         recommended_jokes = [self.joke_ids[i] for i in top_indices]
-
-        if not recommended_jokes:
-            print(f"⚠️ No recommendations found for Joke ID {joke_id}. Returning an empty list.")
-            return []  # Return an empty list if something went wrong
 
         return recommended_jokes
 
     def save_model(self, filepath):
         """
-        💾 Saves the model as .npy files for the similarity matrix and joke IDs.
+        💾 Save the entire Content-Based model object as a pickle file.
 
         Args:
-            filepath (str): Directory path to save the model files.
+            filepath (str): File path where the model should be saved (should end with .pkl).
         """
-        os.makedirs(filepath, exist_ok=True)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'wb') as f:
+            pickle.dump(self, f)
+        print(f"✅ Model saved successfully to {filepath}")
 
-        np.save(os.path.join(filepath, 'similarity_matrix.npy'), self.similarity_matrix)
-        with open(os.path.join(filepath, 'joke_ids.json'), 'w') as f:
-            json.dump(self.joke_ids, f)
-
-        print(f"✅ Model saved at {filepath}")
-
-    def load_model(self, filepath):
+    @staticmethod
+    def load_model(filepath):
         """
-        📦 Loads the saved similarity matrix and joke IDs.
+        📦 Load the entire Content-Based model object from a pickle file.
 
         Args:
-            filepath (str): Directory path to load the model files from.
+            filepath (str): File path from where the model should be loaded.
+
+        Returns:
+            ContentBasedModel: The loaded Content-Based model instance.
         """
-        self.similarity_matrix = np.load(os.path.join(filepath, 'similarity_matrix.npy'))
+        if not os.path.exists(filepath):
+            raise ValueError(f"❌ File not found: {filepath}")
 
-        with open(os.path.join(filepath, 'joke_ids.json'), 'r') as f:
-            self.joke_ids = json.load(f)
+        with open(filepath, 'rb') as f:
+            model = pickle.load(f)
 
-        print(f"📦 Model loaded from {filepath}")
+        print(f"📦 Model loaded successfully from {filepath}")
+        return model

@@ -1,15 +1,17 @@
 import polars as pl
+import joblib
+import os
 
 
 class BaselineModel:
-    def __init__(self, ratings: pl.DataFrame, items: pl.DataFrame):
+    def __init__(self, ratings: pl.DataFrame = None, items: pl.DataFrame = None):
         self.ratings = ratings
         self.items = items
-        self.top_100_jokes = None  # Store the top 100 jokes after training
+        self.all_jokes = None  # Store all jokes after training
 
     def train(self):
         """
-        Train the baseline model to compute the top 100 jokes based on average rating.
+        Train the baseline model to compute all jokes ranked by average rating.
         """
         print("🚀 Training Baseline Model...")
 
@@ -21,49 +23,68 @@ class BaselineModel:
         ratings_filtered = self.ratings.filter(pl.col("userId").is_in(valid_users))
         print("📊 Filtered valid users for training...")
 
-        # Get top 100 jokes based on average rating
-        self.top_100_jokes = (
+        # Get all jokes ranked by average rating
+        self.all_jokes = (
             ratings_filtered
             .groupby("jokeId")
             .agg(pl.col("rating").mean().alias("avg_rating"))
             .sort("avg_rating", descending=True)
-            .head(100)
             .select("jokeId")
             .to_series()
             .to_list()
         )
-        print(f"✅ Top 100 Jokes calculated successfully. Total jokes: {len(self.top_100_jokes)}")
+        print(f"✅ All jokes ranked successfully. Total jokes: {len(self.all_jokes)}")
 
-    def save_model(self, filepath: str):
+    def save_model(self, folder_path: str):
         """
-        Save the top 100 jokes as a Parquet or JSON file.
-        """
-        print(f"💾 Saving model to {filepath}...")
-        df = pl.DataFrame({"top_100_jokes": self.top_100_jokes})
-        if filepath.endswith(".parquet"):
-            df.write_parquet(filepath)
-        elif filepath.endswith(".json"):
-            df.write_json(filepath)
-        else:
-            raise ValueError("❌ Unsupported file format. Use .parquet or .json")
-        print(f"✅ Model saved successfully at {filepath}")
+        Save the model to separate files.
 
-    def load_model(self, filepath: str):
+        Args:
+            folder_path (str): Directory path to save the model files.
         """
-        Load the top 100 jokes from a Parquet or JSON file.
-        """
-        print(f"📂 Loading model from {filepath}...")
-        if filepath.endswith(".parquet"):
-            self.top_100_jokes = pl.read_parquet(filepath)["top_100_jokes"].to_list()
-        elif filepath.endswith(".json"):
-            self.top_100_jokes = pl.read_json(filepath)["top_100_jokes"].to_list()
-        else:
-            raise ValueError("❌ Unsupported file format. Use .parquet or .json")
-        print(f"✅ Model loaded successfully. Total jokes: {len(self.top_100_jokes)}")
+        os.makedirs(folder_path, exist_ok=True)
 
-    def predict(self):
+        print(f"💾 Saving Baseline Model to {folder_path}...")
+
+        # Save Polars DataFrame (as Parquet)
+        if self.ratings is not None:
+            self.ratings.write_parquet(os.path.join(folder_path, 'ratings.parquet'))
+
+        if self.items is not None:
+            self.items.write_parquet(os.path.join(folder_path, 'items.parquet'))
+
+        # Save other attributes with joblib
+        joblib.dump({
+            'all_jokes': self.all_jokes
+        }, os.path.join(folder_path, 'baseline_model.pkl'))
+
+        print(f"✅ Model saved successfully in {folder_path}")
+
+    @staticmethod
+    def load_model(folder_path: str):
         """
-        Return the precomputed top 100 jokes.
+        Load the model from separate files in the specified directory.
+
+        Args:
+            folder_path (str): Directory path to load the model files.
         """
-        print("🎉 Returning top 100 precomputed jokes...")
-        return self.top_100_jokes
+        print(f"📂 Loading Baseline Model from {folder_path}...")
+
+        # Load Parquet files
+        ratings = pl.read_parquet(os.path.join(folder_path, 'ratings.parquet'))
+        items = pl.read_parquet(os.path.join(folder_path, 'items.parquet'))
+
+        # Load other attributes from joblib file
+        data = joblib.load(os.path.join(folder_path, 'baseline_model.pkl'))
+
+        model = BaselineModel(ratings=ratings, items=items)
+        model.all_jokes = data['all_jokes']
+
+        print(f"✅ Model loaded successfully from {folder_path}.")
+        return model
+
+    def recommend(self, user_id=None, top_n=100):
+        """
+        Return the precomputed top-N jokes.
+        """
+        return self.all_jokes[:top_n]
